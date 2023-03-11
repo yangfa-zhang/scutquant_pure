@@ -99,6 +99,7 @@ def report_all(user_account, benchmark, ret=True, excess_return=True, risk=True,
         acc_ret.append(acc_val[i] / init_val_acc - 1)
         ben_ret.append(ben_val[i] / init_val_ben - 1)
     excess_ret = []
+
     for i in range(len(acc_ret)):
         excess_ret.append(acc_ret[i] - ben_ret[i])
         if acc_ret[i] > 0:
@@ -121,6 +122,7 @@ def report_all(user_account, benchmark, ret=True, excess_return=True, risk=True,
     print('Max Drawdown(benchmark):', ben_mdd.min(), '\n')
     print('Sharpe Ratio:', sharpe)
     print('Information Ratio:', inf_ratio, '\n')
+    print('Pearson Correlation Coefficient Between Return and Benchmark:', pd.Series(acc_ret).corr(pd.Series(ben_ret)))
     print('Profitable Days(%):', days)
 
     if ret:
