@@ -35,20 +35,22 @@ class Account:
         self.risk_curve = []
         # todo: 增加换手率(turnover)
 
-    def check_order(self, order, price, cost_rate=0.00015, min_cost=5):  # 检查是否有足够的资金完成order, 如果不够则不买
+    def check_order(self, order, price, cost_rate=0.0015, min_cost=5):  # 检查是否有足够的资金完成order, 如果不够则不买
         # todo: 增加风险度判断（执行该order会不会超出最大风险度）
         cash_inflow = 0.0
         cash_outflow = 0.0
         for code in order['sell'].keys():
+            if code in self.available.keys():  # 如果做空的品种有底仓, 则清空底仓
+                order["sell"][code] = self.available[code]
             cash_inflow += price[code] * order['sell'][code]
         for code in order['buy'].keys():
             cash_outflow += price[code] * order['buy'][code]
         cost = max(min_cost, (cash_inflow + cash_outflow) * cost_rate)
         cash_needed = cash_outflow - cash_inflow + cost
         if cash_needed > self.cash:
-            return False
+            return order, False
         else:
-            return True
+            return order, True
 
     def update_price(self, price):  # 更新市场价格
         for code in price.keys():
@@ -70,54 +72,35 @@ class Account:
             self.buy_hist.append({})
             self.sell_hist.append({})
 
-    def buy(self, order_buy, cost_rate=0.00015, min_cost=5, update_position=True):  # 买入函数
+    def buy(self, order_buy, cost_rate=0.0015, min_cost=5):  # 买入函数
         buy_value = 0.0
-        if update_position:
-            for code in order_buy.keys():  # 如果资产池里已经有该资产了，那就可以直接加，没有的话就要在字典里添加键值对
-                if code in self.position.keys():
-                    self.position[code] += order_buy[code]  # 更新持仓
-                    self.available[code] += order_buy[code]  # 更新可交易头寸
-                else:
-                    self.position[code] = order_buy[code]
-                    self.available[code] = order_buy[code]
-                buy_value += self.price[code] * order_buy[code]
-        else:
-            for code in order_buy.keys():  # 如果资产池里已经有该资产了，那就可以直接加，没有的话就要在字典里添加键值对
-                buy_value += self.price[code] * order_buy[code]
+        for code in order_buy.keys():  # 如果资产池里已经有该资产了，那就可以直接加，没有的话就要在字典里添加键值对
+            if code in self.position.keys():
+                self.position[code] += order_buy[code]  # 更新持仓
+                self.available[code] += order_buy[code]  # 更新可交易头寸
+            else:
+                self.position[code] = order_buy[code]
+                self.available[code] = order_buy[code]
+            buy_value += self.price[code] * order_buy[code]
         cost = max(min_cost, buy_value * cost_rate)
         self.cost += cost
         self.cash -= (buy_value + cost)  # 更新现金
 
-    def sell(self, order_sell, cost_rate=0.00005, min_cost=5, update_position=True, short_available=True):  # 卖出函数
+    def sell(self, order_sell, cost_rate=0.0005, min_cost=5):  # 卖出函数
+        # 做空时, 如果用底仓做空, 则清空底仓; 若融券做空, 则按照"short_volume"参数决定做空数量
         sell_value = 0.0
-        if short_available:
-            if update_position:
-                for code in order_sell.keys():
-                    if code in self.position.keys():
-                        if self.position[code] >= order_sell[code]:  # 若底仓满足做空需求，则使用底仓做空，否则不动底仓
-                            self.position[code] -= order_sell[code]
-                            self.available[code] -= order_sell[code]
-                    sell_value += self.price[code] * order_sell[code]
+        for code in order_sell.keys():
+            if code in self.position.keys():
+                self.position[code] -= order_sell[code]
+                self.available[code] -= order_sell[code]
             else:
-                for code in order_sell.keys():
-                    sell_value += self.price[code] * order_sell[code]
-        else:
-            if update_position:
-                for code in order_sell.keys():
-                    if code in self.available.keys():
-                        if self.available[code] >= order_sell[code]:  # 若可用持仓量可以满足交易，则执行交易
-                            self.position[code] -= order_sell[code]  # 更新持仓
-                            self.available[code] -= order_sell[code]  # 更新可交易头寸
-                            sell_value += self.price[code] * order_sell[code]
-            else:
-                for code in order_sell.keys():
-                    if code in self.available.keys():
-                        if self.available[code] >= order_sell[code]:  # 若可用持仓量可以满足交易，则执行交易
-                            sell_value += self.price[code] * order_sell[code]
+                self.position[code] = -order_sell[code]
+                self.available[code] = -order_sell[code]
+            sell_value += self.price[code] * order_sell[code]
         cost = max(min_cost, sell_value * cost_rate) if sell_value != 0 else 0
         self.cash += (sell_value - cost)  # 更新现金
 
-    def update_all(self, order, price, cost_buy=0.00015, cost_sell=0.00005, min_cost=5, trade=True):
+    def update_all(self, order, price, cost_buy=0.0015, cost_sell=0.0005, min_cost=5, trade=True):
         # 更新市场价格、交易记录、持仓和可交易数量、交易费用和现金，市值
         # order的Key不一定要包括所有资产，但必须是position的子集
         Account.update_price(self, price)  # 首先更新市场价格
@@ -141,8 +124,8 @@ class Account:
         if len(self.buy_hist) >= freq:
             offset_buy = self.sell_hist[-freq]
             offset_sell = self.buy_hist[-freq]
-            Account.sell(self, offset_sell, cost_sell, min_cost, update_position=True)  # 减持
-            Account.buy(self, offset_buy, cost_buy, min_cost, update_position=False)  # 做空时，借外面的股票后还回去，持仓不受影响
+            Account.sell(self, offset_sell, cost_sell, min_cost)  # 卖出平仓
+            Account.buy(self, offset_buy, cost_buy, min_cost)  # 买入平仓
 
     def risk_control(self, risk_degree, cost_rate=0.0005, min_cost=5):  # 控制风险, 当风险度超过计划风险度时, 按比例减少持仓
         # 令risk回到risk_degree: 各资产持仓量为向量x, 各资产市场价格为向量p, 总市值为v, 风险度 r = p*x/v. 即px = rv.
