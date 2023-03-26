@@ -372,8 +372,7 @@ def group_split(X, params=None):
 ####################################################
 # 自动处理器
 ####################################################
-def auto_process(X, y, groupby=None, datetime=None, norm='z', label_norm=True, select=True, orth=True,
-                 split_params=None):
+def auto_process(X, y, groupby=None, norm='z', label_norm=True, select=True, orth=True, split_params=None):
     """
     流程如下：
     初始化X，计算缺失值百分比，填充/去除缺失值，拆分数据集，判断训练集中目标值类别是否平衡并决定是否降采样（升采样和其它方法还没实现），分离Y并且画出其分布，
@@ -396,6 +395,7 @@ def auto_process(X, y, groupby=None, datetime=None, norm='z', label_norm=True, s
     :param split_params: dict, 划分数据集的方法
     :return: dict{X_train, X_test, y_train, y_test, ymean, ystd}
     """
+    datetime = X.index.names[0]
     if split_params is None:
         split_params = {
             "method": "group_split",
@@ -444,10 +444,11 @@ def auto_process(X, y, groupby=None, datetime=None, norm='z', label_norm=True, s
     if label_norm:
         if groupby is None:
             ymean, ystd = y_train.mean(), y_train.std()
+            y_train, y_test = zscorenorm(y_train, ymean, ystd), zscorenorm(y_test, ymean, ystd)
         else:
             ymean, ystd = y_test.groupby(datetime).mean(), y_test.groupby(datetime).std()
-        y_train = zscorenorm(y_train, y_train.groupby(datetime).mean(), y_train.groupby(datetime).std())
-        y_test = zscorenorm(y_test, ymean, ystd)
+            y_train = zscorenorm(y_train, y_train.groupby(datetime).mean(), y_train.groupby(datetime).std())
+            y_test = zscorenorm(y_test, ymean, ystd)
         print('label norm done', '\n')
     else:
         ymean, ystd = 0, 1
@@ -509,7 +510,7 @@ def auto_process(X, y, groupby=None, datetime=None, norm='z', label_norm=True, s
             X_train = make_pca(X_train)
             X_test = make_pca(X_test)
             print('PCA done')
-            
+
     X_train, y_train = align(X_train, y_train)
     X_test, y_test = align(X_test, y_test)
     print('all works done', '\n')
@@ -714,31 +715,18 @@ def pearson_corr(x, y):
     return cor
 
 
-def ic_ana(pred, y, groupby=None, freq=1, plot=True):
+def ic_ana(pred, y, groupby=None, plot=True):
     """
     :param pred: pd.DataFrame or pd.Series, 预测值
     :param y: pd.DataFrame or pd.Series, 真实值
     :param groupby: str, 排序依据
-    :param freq: int, 仅在groupby=None下生效，作用是对个资产返回一段时间（调仓频率）的pearson相关系数
     :param plot: bool, 控制是否画出IC曲线
     :return: float, 依次为ic均值, icir, rank_ic均值和rank_icir
     """
-    if groupby is not None:
-        concat_data = pd.concat([pred, y], axis=1)
-        ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1]))
-        rank_ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1], method='spearman'))
-    else:
-        from scipy import stats
-        ic = []
-        rank_ic = []
-        for i in range(0, len(y), freq):
-            sample_pred = pred[i:i + freq]
-            sample_y = y[i:i + freq]
-            ic.append(pearson_corr(sample_pred, sample_y))
-            rank_ic.append(stats.spearmanr(sample_pred, sample_y)[0])
-        ic = pd.Series(ic)
-        rank_ic = pd.Series(rank_ic)
-    # print('rank_ic:', rank_ic)
+    groupby = pred.index.names[1] if groupby is None else groupby
+    concat_data = pd.concat([pred, y], axis=1)
+    ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1]))
+    rank_ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1], method='spearman'))
     if plot:
         plt.figure(figsize=(10, 6))
         plt.plot(ic.values, label='ic', marker='o')
