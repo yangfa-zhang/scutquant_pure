@@ -723,7 +723,7 @@ def ic_ana(pred, y, groupby=None, plot=True):
     :param plot: bool, 控制是否画出IC曲线
     :return: float, 依次为ic均值, icir, rank_ic均值和rank_icir
     """
-    groupby = pred.index.names[1] if groupby is None else groupby
+    groupby = pred.index.names[0] if groupby is None else groupby
     concat_data = pd.concat([pred, y], axis=1)
     ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1]))
     rank_ic = concat_data.groupby(groupby).apply(lambda x: x.iloc[:, 0].corr(x.iloc[:, 1], method='spearman'))
