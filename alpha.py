@@ -114,22 +114,14 @@ def make_factors(kwargs=None, windows=None):
     if close is not None:
         for w in windows:
             X["CLOSE" + str(w)] = data[close].groupby(groupby).shift(w) / data[close]
-            # https://www.investopedia.com/terms/r/rateofchange.asp
             X["ROC" + str(w)] = (data[close] - data[close].groupby(groupby).shift(w) - 1) / w
-            # The rate of close price change in the past d days, divided by latest close price to remove unit
             X["BETA" + str(w)] = (data[close] - data[close].groupby(groupby).shift(w)) / (data[close] * w)
-            # https://www.investopedia.com/ask/answers/071414/whats-difference-between-moving-average-and-weighted-moving-average.asp
             X["MA" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).mean()) / data[close]
-            # The standard diviation of close price for the past d days, divided by latest close price to remove unit
             X["STD" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).std()) / data[close]
-            # The max price for past d days, divided by latest close price to remove unit
             X["MAX" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).max()) / data[close]
-            # The low price for past d days, divided by latest close price to remove unit
             X["MIN" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).min()) / data[close]
-            # The 80% quantile of past d day's close price, divided by latest close price to remove unit
             X["QTLU" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).quantile(0.8)) / data[
                 close]
-            # The 20% quantile of past d day's close price, divided by latest close price to remove unit
             X["QTLD" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).quantile(0.2)) / data[
                 close]
         if open is not None:
@@ -163,7 +155,6 @@ def make_factors(kwargs=None, windows=None):
                     for w in windows:
                         LOW = data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())
                         HIGH = data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())
-                        # Represent the price position between upper and lower resistent price for past d days.
                         X["RSV" + str(w)] = (data[close] - LOW) / (HIGH - LOW + 1e-12)
     if open is not None:
         for w in windows:
@@ -171,7 +162,6 @@ def make_factors(kwargs=None, windows=None):
     if high is not None:
         for w in windows:
             X["HIGH" + str(w)] = data[high].groupby(groupby).shift(w) / data[high]
-            # Part of Aroon Indicator https://www.investopedia.com/terms/a/aroon.asp
             X["IMAX" + str(w)] = 100 * (w - data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())) / (
                         data[close] * w)
         if low is not None:
@@ -182,22 +172,18 @@ def make_factors(kwargs=None, windows=None):
             for w in windows:
                 IMAX = 100 * (w - data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())) / w
                 IMIN = 100 * (w - data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())) / w
-                # The time period between previous lowest-price date occur after highest price date.
                 X["IMXD" + str(w)] = (IMAX - IMIN) / data[close]
             if close is not None:
                 X["MEAN1"] = (data[high] + data[low]) / (2 * data[close])
     if low is not None:
         for w in windows:
             X["LOW" + str(w)] = data[low].groupby(groupby).shift(w) / data[low]
-            # Part of Aroon Indicator https://www.investopedia.com/terms/a/aroon.asp
             X["IMIN" + str(w)] = 100 * (w - data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())) / (
                     data[close] * w)
     if volume is not None:
         for w in windows:
             X["VOLUME" + str(w)] = data[volume].groupby(groupby).shift(w) / data[volume]
-            # https://www.barchart.com/education/technical-indicators/volume_moving_average
             X["VMA" + str(w)] = data[volume].groupby(groupby).transform(lambda x: x.rolling(w).mean()) / data[volume]
-            # The standard deviation for volume in past d days.
             X["VSTD" + str(w)] = data[volume].groupby(groupby).transform(lambda x: x.rolling(w).std()) / data[volume]
         X["VMEAN"] = data[volume] / data[volume].groupby(datetime).mean()
         if amount is not None:
