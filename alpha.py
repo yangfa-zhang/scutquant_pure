@@ -41,6 +41,29 @@
     (2)截面回归（或时序回归），即 因子检验方法 (1)，并做t检验
 """
 import pandas as pd
+import time
+
+
+def cal_dif(prices, n=12, m=26):
+    ema_n = prices.ewm(span=n, min_periods=n - 1).mean()
+    ema_m = prices.ewm(span=m, min_periods=m - 1).mean()
+    dif = ema_n - ema_m
+    return dif
+
+
+def cal_dea(dif, k=9):
+    dea = dif.ewm(span=k, min_periods=k - 1).mean()
+    return dea
+
+
+def cal_rsi(prices, n=14):
+    deltas = prices.diff()
+    seed = deltas[:n + 1]
+    up = seed[seed >= 0].sum() / n
+    down = -seed[seed < 0].sum() / n
+    rs = up / (down + 1e-12)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 
 def make_factors(kwargs=None, windows=None):
@@ -68,17 +91,17 @@ def make_factors(kwargs=None, windows=None):
     :param kwargs:
     {
         data: pd.DataFrame, 输入的数据
-        price: str, 最新价格
-        open: str, 最近的收盘价（昨天或者其它）
+        close: str, 收盘价的列名
+        open: str, 开盘价的列名
         volume: str, 当前tick的交易量
         amount: str, 当前tick的交易额
         high: str, 当前tick的最高价
         low: str, 当前tick的最低价
-        label : str, 目标值
     }
     :param windows: list, 移动窗口的列表
     :return: pd.DataFrame
     """
+    start = time.time()
     if kwargs is None:
         kwargs = {}
     if "data" not in kwargs.keys():
@@ -112,19 +135,47 @@ def make_factors(kwargs=None, windows=None):
     X = pd.DataFrame(index=data.index)
 
     if close is not None:
+        data["ret"] = data[close].groupby(groupby).shift(1) / data[close] - 1
+        mean_ret = data["ret"].groupby(datetime).mean()
+        # MACD中的DIF和DEA, 由于MACD是它们的线性组合所以没必要当作因子
+        # X["DIF"] = data[close].groupby(groupby).transform(lambda x: cal_dif(x))
+        # X["DEA"] = X["DIF"].groupby(groupby).transform(lambda x: cal_dea(x))
+        for i in range(1, 5):
+            X["RET1_" + str(i)] = (data[close].groupby(groupby).shift(i) / data[close] - 1)
+            X["RET2_" + str(i)] = (data[close].groupby(groupby).shift(i) / data[close] - 1).groupby(datetime).rank(
+                pct=True)
         for w in windows:
             X["CLOSE" + str(w)] = data[close].groupby(groupby).shift(w) / data[close]
+            # https://www.investopedia.com/terms/r/rateofchange.asp
             X["ROC" + str(w)] = (data[close] - data[close].groupby(groupby).shift(w) - 1) / w
+            # The rate of close price change in the past d days, divided by latest close price to remove unit
             X["BETA" + str(w)] = (data[close] - data[close].groupby(groupby).shift(w)) / (data[close] * w)
+            # https://www.investopedia.com/ask/answers/071414/whats-difference-between-moving-average-and-weighted-moving-average.asp
             X["MA" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).mean()) / data[close]
+            # The standard diviation of close price for the past d days, divided by latest close price to remove unit
             X["STD" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).std()) / data[close]
+            # The max price for past d days, divided by latest close price to remove unit
             X["MAX" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).max()) / data[close]
+            # The low price for past d days, divided by latest close price to remove unit
             X["MIN" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).min()) / data[close]
+            # The 80% quantile of past d day's close price, divided by latest close price to remove unit
             X["QTLU" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).quantile(0.8)) / data[
                 close]
+            # The 20% quantile of past d day's close price, divided by latest close price to remove unit
             X["QTLD" + str(w)] = data[close].groupby(groupby).transform(lambda x: x.rolling(w).quantile(0.2)) / data[
                 close]
+            # 受统计套利理论(股票配对交易)的启发，追踪个股收益率与大盘收益率的相关系数
+            # 这里的思路是: 如果近期(rolling=5, 10)的相关系数偏离了远期相关系数(rolling=30, 60), 则有可能是个股发生了异动,
+            # 可根据异动的方向选择个股与大盘的多空组合
+            X["CORR" + str(w)] = data["ret"].groupby(groupby).transform(
+                lambda x: x.rolling(w).corr(mean_ret.rolling(w)))
+            # RSI指标
+            # X["RSI" + str(w)] = data[close].groupby(groupby).transform(lambda x: cal_rsi(x, w))
+        del data["ret"]
+        del mean_ret
+
         if open is not None:
+            X["DELTA"] = (data[close] - data[open]).groupby(datetime).rank(pct=True)
             X["KMID"] = data[close] / data[open] - 1
             # performance: 股票当日收益率相对大盘的表现
             X["PERF1"] = (data[close] / data[open] - 1) / (data[close] / data[open] - 1).groupby(datetime).mean()
@@ -144,6 +195,14 @@ def make_factors(kwargs=None, windows=None):
             if high is not None:
                 X["KUP"] = (data[high] - data[open]) / data[open]
                 if low is not None:
+                    l9 = data[low].groupby(groupby).transform(lambda x: x.rolling(9).min())
+                    h9 = data[high].groupby(groupby).transform(lambda x: x.rolling(9).max())
+                    # KDJ指标
+                    X["KDJ_K"] = (data[close] - l9) / (h9 - l9) * 100
+                    X["KDJ_D"] = X["KDJ_K"].groupby(groupby).transform(lambda x: x.rolling(3).mean())
+                    # X["KDJ_J"] = 3 * X["KDJ_D"] - 2 * X["KDJ_K"]  # K和D的线性组合，没必要加上
+                    del l9
+                    del h9
                     X["KLEN"] = (data[high] - data[low]) / data[open]
                     X["KIMD2"] = (data[close] - data[open]) / (data[high] - data[low] + 1e-12)
                     X["KUP2"] = (data[high] - data[open]) / (data[high] - data[low] + 1e-12)
@@ -155,6 +214,7 @@ def make_factors(kwargs=None, windows=None):
                     for w in windows:
                         LOW = data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())
                         HIGH = data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())
+                        # Represent the price position between upper and lower resistent price for past d days.
                         X["RSV" + str(w)] = (data[close] - LOW) / (HIGH - LOW + 1e-12)
     if open is not None:
         for w in windows:
@@ -162,28 +222,29 @@ def make_factors(kwargs=None, windows=None):
     if high is not None:
         for w in windows:
             X["HIGH" + str(w)] = data[high].groupby(groupby).shift(w) / data[high]
+            # Part of Aroon Indicator https://www.investopedia.com/terms/a/aroon.asp
             X["IMAX" + str(w)] = 100 * (w - data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())) / (
-                        data[close] * w)
+                    data[close] * w)
         if low is not None:
-            X["PERF5"] = (data[high] / data[low] - 1) / (data[high] / data[low] - 1).groupby(datetime).mean()
-            X["PERF6"] = (data[high] / data[low] - 1) / (data[high] / data[low] - 1).groupby(datetime).max()
-            X["PERF7"] = (data[high] / data[low] - 1) / (data[high] / data[low] - 1).groupby(datetime).min()
-            X["PERF7"] = (data[high] / data[low] - 1) / (data[high] / data[low] - 1).groupby(datetime).median()
             for w in windows:
                 IMAX = 100 * (w - data[high].groupby(groupby).transform(lambda x: x.rolling(w).max())) / w
                 IMIN = 100 * (w - data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())) / w
+                # The time period between previous lowest-price date occur after highest price date.
                 X["IMXD" + str(w)] = (IMAX - IMIN) / data[close]
             if close is not None:
                 X["MEAN1"] = (data[high] + data[low]) / (2 * data[close])
     if low is not None:
         for w in windows:
             X["LOW" + str(w)] = data[low].groupby(groupby).shift(w) / data[low]
+            # Part of Aroon Indicator https://www.investopedia.com/terms/a/aroon.asp
             X["IMIN" + str(w)] = 100 * (w - data[low].groupby(groupby).transform(lambda x: x.rolling(w).min())) / (
                     data[close] * w)
     if volume is not None:
         for w in windows:
             X["VOLUME" + str(w)] = data[volume].groupby(groupby).shift(w) / data[volume]
+            # https://www.barchart.com/education/technical-indicators/volume_moving_average
             X["VMA" + str(w)] = data[volume].groupby(groupby).transform(lambda x: x.rolling(w).mean()) / data[volume]
+            # The standard deviation for volume in past d days.
             X["VSTD" + str(w)] = data[volume].groupby(groupby).transform(lambda x: x.rolling(w).std()) / data[volume]
         X["VMEAN"] = data[volume] / data[volume].groupby(datetime).mean()
         if amount is not None:
@@ -191,13 +252,17 @@ def make_factors(kwargs=None, windows=None):
             X["MEAN2"] = mean / mean.groupby(datetime).mean()
             for w in windows:
                 X["MEAN2_" + str(w)] = mean.groupby(groupby).shift(w) / mean
+            del mean
     if amount is not None:
         for w in windows:
             X["AMOUNT" + str(w)] = data[amount].groupby(groupby).shift(w) / data[amount]
+    end = time.time()
+    print("time used:", end - start)
     return X
 
 
 def alpha360(kwargs, shift=60):
+    start = time.time()
     if kwargs is None:
         kwargs = {}
     if "data" not in kwargs.keys():
@@ -254,5 +319,6 @@ def alpha360(kwargs, shift=60):
         group = data[amount].groupby(groupby)
         for i in range(1, shift + 1):
             X[amount + str(i)] = group.shift(i) / (data[close] * data[volume])
-
+    end = time.time()
+    print("time used:", end - start)
     return X
