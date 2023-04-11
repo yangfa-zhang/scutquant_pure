@@ -282,8 +282,8 @@ class Ensemble:
 
     def fit(self, X_train, y_train, X_valid, y_valid):
         Ensemble.create_model(self)
-        for model in self.models:
-            model.fit(X_train, y_train, X_valid, y_valid)
+        for i in range(len(self.models)):
+            self.models[i].fit(X_train, y_train, X_valid, y_valid)
 
     def predict(self, X_test):
         predict = [0 for _ in range(len(X_test))]
