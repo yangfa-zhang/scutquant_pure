@@ -1,4 +1,4 @@
-from tensorflow.keras import layers, regularizers
+from keras import layers, regularizers
 from tensorflow import keras
 
 """
@@ -11,8 +11,8 @@ from tensorflow import keras
 
     其它模型同理
     
-    目前实现的模型包括: DNN, LSTM, Bi-LSTM和Attention (scutquant模块还有OLS, ridge, lasso, XGBoost, hybrid和lightGBM)
-    计划实现的模型包括: CNN, RNN, GRU
+    目前实现的模型包括: DNN, CNN, LSTM, Bi-LSTM和Attention (scutquant模块还有OLS, ridge, lasso, XGBoost, hybrid和lightGBM)
+    计划实现的模型包括: RNN, GRU
 """
 
 
@@ -149,6 +149,7 @@ class Attention:
     """
     复现了Attention Is All You Need 中的部分结构(指encoder, decoder目前还没实现)
     """
+
     def __init__(self, n_attentions=8, n_encoders=1, activation="swish", optimizer="adam", loss="mse", metrics=None,
                  l1=1e-5, l2=1e-5, epochs=10, batch_size=256, model=None):
         if metrics is None:
@@ -202,4 +203,90 @@ class Attention:
 
     def predict(self, x_test):
         predict = self.model.predict(x_test)
+        return predict
+
+
+class CNN:
+    def __init__(self, n_layers=2, filters=32, kernel_size=9, strides=3, activation="swish", optimizer="adam",
+                 loss="mse", metrics=None, l1=1e-5, l2=1e-5, epochs=10, batch_size=256, model=None):
+        if metrics is None:
+            metrics = ["mae", "mape"]
+        self.layers = n_layers
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.activation = activation
+        self.optimizer = optimizer
+        self.loss = loss
+        self.metrics = metrics
+        self.l1 = l1
+        self.l2 = l2
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.model = model
+
+    def create_model(self):
+        model = keras.Sequential()
+        n_filters = self.filters
+        kernel_size = self.kernel_size
+        strides = self.strides
+
+        if self.layers > 1:
+            for i in range(self.layers - 1):
+                model.add(
+                    layers.Conv1D(n_filters, kernel_size=kernel_size, strides=strides, activation=self.activation))
+                model.add(layers.BatchNormalization())
+                model.add(layers.MaxPooling1D(pool_size=2, strides=1))
+                n_filters *= 2
+                kernel_size = kernel_size - 2 if kernel_size > 2 else 1
+
+        model.add(
+            layers.Conv1D(n_filters, kernel_size=kernel_size, strides=strides, activation=self.activation))
+        model.add(layers.BatchNormalization())
+        model.add(layers.MaxPooling1D(pool_size=2, strides=1))
+
+        model.add(layers.Flatten())
+        model.add(layers.Dense(1, kernel_regularizer=regularizers.l1_l2(self.l1, self.l2)))
+        model.compile(optimizer=self.optimizer, loss=self.loss, metrics=self.metrics)
+        return model
+
+    def fit(self, x_train, y_train, x_valid, y_valid):
+        x_train, x_valid = x_train.values.reshape(-1, x_train.shape[1], 1), \
+                           x_valid.values.reshape(-1, x_valid.shape[1], 1)
+        self.model = CNN.create_model(self)
+        self.model.fit(x_train, y_train, validation_data=(x_valid, y_valid), epochs=self.epochs,
+                       batch_size=self.batch_size)
+
+    def predict(self, x_test):
+        x_test = x_test.values.reshape(-1, x_test.shape[1], 1)
+        predict = self.model.predict(x_test)
+        return predict
+
+
+class Ensemble:
+    def __init__(self, models=None, weight=None):
+        """
+        :param models: None 或者已训练好的模型列表. 如果为None则在fit()函数中使用默认参数训练两个CNN模型
+        :param weight: None 或者各模型的权重
+        """
+        self.models = models
+        self.weight = weight
+
+    def create_model(self):
+        if self.models is None:
+            self.models = []
+            for i in range(2):
+                self.models.append(CNN().create_model())
+            w = 1 / len(self.models)
+            self.weight = [w for _ in range(len(self.models))] if self.weight is None else self.weight
+
+    def fit(self, X_train, y_train, X_valid, y_valid):
+        Ensemble.create_model(self)
+        for model in self.models:
+            model.fit(X_train, y_train, X_valid, y_valid)
+
+    def predict(self, X_test):
+        predict = [0 for _ in range(len(X_test))]
+        for i in range(len(self.models)):
+            predict += self.models[i].predict(X_test) * self.weight[i]
         return predict
