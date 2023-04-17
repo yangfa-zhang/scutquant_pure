@@ -90,7 +90,7 @@ def join_data_by_code(data, data_join, code='instrument', col=None, index=None):
 ####################################################
 # 特征工程
 ####################################################
-def price2ret(price, shift1=-1, shift2=-21, groupby=None, fill=False):
+def price2ret(price, shift1=-1, shift2=-2, groupby=None, fill=False):
     """
     return_rate = price_shift2 / price_shift1 - 1
 
@@ -102,9 +102,11 @@ def price2ret(price, shift1=-1, shift2=-21, groupby=None, fill=False):
     :return: pd.Series
     """
     if groupby is None:
-        ret = price.shift(shift2) / price.shift(shift1) - 1
+        ret = price.shift(shift2) / price.shift(shift1).fillna(price.mean) - 1
     else:
-        ret = price.groupby([groupby]).shift(shift2) / price.groupby([groupby]).shift(shift1) - 1
+        shift_1 = price.groupby([groupby]).shift(shift1)
+        shift_2 = price.groupby([groupby]).shift(shift2)
+        ret = shift_2 / shift_1 - 1
     if fill:
         ret.fillna(0, inplace=True)
     return ret
@@ -162,7 +164,39 @@ def make_pca(X):
     X_pca = pca.fit_transform(X)
     component_names = [f"PC{i + 1}" for i in range(X_pca.shape[1])]
     X_pca = pd.DataFrame(X_pca, columns=component_names, index=index)
-    return X_pca
+    loadings = pd.DataFrame(
+        pca.components_.T,  # transpose the matrix of loadings
+        columns=component_names,  # so the columns are the principal components
+        index=X.columns,  # and the rows are the original features
+    )
+    result = {
+        "pca": pca,
+        "loadings": loadings,
+        "X_pca": X_pca
+    }
+    return result
+
+
+def plot_pca_variance(pca):
+    # Create figure
+    fig, axs = plt.subplots(1, 2)
+    n = pca.n_components_
+    grid = np.arange(1, n + 1)
+    # Explained variance
+    evr = pca.explained_variance_ratio_
+    axs[0].bar(grid, evr)
+    axs[0].set(
+        xlabel="Component", title="% Explained Variance", ylim=(0.0, 1.0)
+    )
+    # Cumulative Variance
+    cv = np.cumsum(evr)
+    axs[1].plot(np.r_[0, grid], np.r_[0, cv], "o-")
+    axs[1].set(
+        xlabel="Component", title="% Cumulative Variance", ylim=(0.0, 1.0)
+    )
+    # Set up figure
+    fig.set(figwidth=8, dpi=100)
+    return axs
 
 
 def symmetric(X):  # 对称正交
@@ -562,6 +596,17 @@ def auto_process(X, y, groupby=None, norm='z', label_norm=True, select=True, ort
 
     print('norm data done', '\n')
 
+    # 特征正则化
+    if orth:
+        r = cal_multicollinearity(X_train)
+        if r > 0.35:
+            print('To solve multicollinearity problem, orthogonal method will be applied')
+            result = make_pca(X_train)
+            pca, X_train = result["pca"], result["X_pca"]
+            X_valid = pca.transform(X_valid)
+            X_test = pca.transform(X_test)
+            print('PCA done')
+
     # 特征选择
     if select:
         mi_score = make_mi_scores(X_train, y_train)
@@ -570,16 +615,6 @@ def auto_process(X, y, groupby=None, norm='z', label_norm=True, select=True, ort
         X_train = feature_selector(X_train, mi_score, value=0, verbose=1)
         X_valid = feature_selector(X_valid, mi_score)
         X_test = feature_selector(X_test, mi_score)
-
-    # 特征正则化
-    if orth:
-        r = cal_multicollinearity(X_train)
-        if r > 0.35:
-            print('To solve multicollinearity problem, orthogonal method will be applied')
-            X_train = make_pca(X_train)
-            X_valid = make_pca(X_valid)
-            X_test = make_pca(X_test)
-            print('PCA done')
 
     X_train, y_train = align(X_train, y_train)
     X_valid, y_valid = align(X_valid, y_valid)
