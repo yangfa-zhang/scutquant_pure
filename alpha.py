@@ -43,21 +43,46 @@
 import pandas as pd
 import time
 from scipy.stats import norm
+from joblib import Parallel, delayed
 
 
-def cal_dif(prices, n=12, m=26):
+def get_factor_loadings(concat_data: pd.DataFrame, feature: str, label: str):
+    """
+    考虑最简单的单指数模型: R = β * Rm + α, 其中α应为0, β = cov(R, Rm) / var(Rm)
+    使用rolling方法避免在回测中出现数据泄露(实盘不会出现这个问题)
+    """
+    cov = concat_data[feature].rolling(60, min_periods=30).cov(concat_data[label])
+    var = concat_data[feature].rolling(60, min_periods=30).var()
+    beta = cov / var
+    return beta * concat_data[feature]
+
+
+def change_fr_into_factor(data: pd.DataFrame, feature: str, label: str = "label"):
+    """
+    change factor return into factors
+    将因子收益转换成因子
+    :param data: pd.DataFrame
+    :param feature: str, col name
+    :param label: str
+    :return: pd.DataFrame
+
+    """
+    return data.groupby(level=1, group_keys=False).apply(lambda x: get_factor_loadings(x, feature, label)).sort_index()
+
+
+def calc_dif(prices: pd.Series, n: int = 12, m: int = 26) -> pd.Series:
     ema_n = prices.ewm(span=n, min_periods=n - 1).mean()
     ema_m = prices.ewm(span=m, min_periods=m - 1).mean()
     dif = ema_n - ema_m
     return dif
 
 
-def cal_dea(dif, k=9):
+def calc_dea(dif: pd.Series, k: int = 9) -> pd.Series:
     dea = dif.ewm(span=k, min_periods=k - 1).mean()
     return dea
 
 
-def cal_rsi(price: pd.Series, windows: int = 14) -> pd.Series:
+def calc_rsi(price: pd.Series, windows: int = 14) -> pd.Series:
     # 计算每日涨跌情况
     diff = price.diff()
     up = diff.copy()
@@ -74,18 +99,18 @@ def cal_rsi(price: pd.Series, windows: int = 14) -> pd.Series:
     return rsi
 
 
-def cal_psy(price: pd.Series, windows: int = 10) -> pd.Series:
+def calc_psy(price: pd.Series, windows: int = 10) -> pd.Series:
     # 计算每日涨跌情况
     diff = price.diff()
     diff[diff > 0] = 1
     diff[diff <= 0] = 0
 
     # 计算PSY指标(其实是个分类指标, 在windows=w时, 最多有w+1个unique value(例如在windows=5时, 有0, 20, 40, 60, 80, 100))
-    psy = diff.rolling(windows).sum() / windows * 100
+    psy = diff.rolling(windows, min_periods=windows - 1).sum() / windows * 100
     return psy
 
 
-def VaR(x: pd.Series, prob=0.05) -> float:
+def VaR(x: pd.Series, prob: float = 0.05) -> float:
     """
     :param x: pd.Series
     :param prob: float
@@ -97,17 +122,18 @@ def VaR(x: pd.Series, prob=0.05) -> float:
 
 
 # 各大类特征
-def MACD(X, data_group, groupby, name=None):
+def MACD(X: pd.DataFrame, data_group: pd.core.groupby.SeriesGroupBy, groupby: str, name=None) -> pd.DataFrame:
     # MACD中的DIF和DEA, 由于MACD是它们的线性组合所以没必要当作因子
     if name is None:
         name = ["DIF", "DEA"]
     features = pd.DataFrame()
-    features[name[0]] = data_group.transform(lambda x: cal_dif(x))
-    features[name[1]] = features[name[0]].groupby(groupby).transform(lambda x: cal_dea(x))
+    features[name[0]] = data_group.transform(lambda x: calc_dif(x))
+    features[name[1]] = features[name[0]].groupby(groupby).transform(lambda x: calc_dea(x))
     return pd.concat([X, features], axis=1)
 
 
-def RET(X, data, data_group, groupby, name="RET"):
+def RET(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, groupby: str, name: str = "RET") \
+        -> pd.DataFrame:
     features = pd.DataFrame()
     for i in range(1, 5):
         features[name + "1_" + str(i)] = (data / data_group.shift(i) - 1)
@@ -115,14 +141,16 @@ def RET(X, data, data_group, groupby, name="RET"):
     return pd.concat([X, features], axis=1)
 
 
-def SHIFT(X, data, data_group, windows, name):
+def SHIFT(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+          name: str) -> pd.DataFrame:
     features = pd.DataFrame()
     for w in windows:
         features[name + str(w)] = data_group.shift(w) / data
     return pd.concat([X, features], axis=1)
 
 
-def ROC(X, data, data_group, windows, name="ROC"):
+def ROC(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+        name: str = "ROC") -> pd.DataFrame:
     # https://www.investopedia.com/terms/r/rateofchange.asp
     features = pd.DataFrame()
     for w in windows:
@@ -130,7 +158,8 @@ def ROC(X, data, data_group, windows, name="ROC"):
     return pd.concat([X, features], axis=1)
 
 
-def BETA(X, data, data_group, windows, name="BETA"):
+def BETA(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+         name: str = "BETA") -> pd.DataFrame:
     # The rate of close price change in the past d days, divided by latest close price to remove unit
     features = pd.DataFrame()
     for w in windows:
@@ -138,138 +167,204 @@ def BETA(X, data, data_group, windows, name="BETA"):
     return pd.concat([X, features], axis=1)
 
 
-def MA(X, data, data_group, windows, name="MA"):
+def MA(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+       name: str = "MA") -> pd.DataFrame:
     # https://www.investopedia.com/ask/answers/071414/whats-difference-between-moving-average-and-weighted-moving-average.asp
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w).mean()) / data
+        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w, min_periods=w - 1).mean()) / data
     return pd.concat([X, features], axis=1)
 
 
-def STD(X, data, data_group, windows, name="STD"):
+def STD(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+        name: str = "STD") -> pd.DataFrame:
     # The standard deviation of close price for the past d days, divided by latest close price to remove unit
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w).std()) / data
+        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w, min_periods=w - 1).std()) / data
     return pd.concat([X, features], axis=1)
 
 
-def MAX(X, data, data_group, windows, name="MAX"):
+def MAX(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+        name: str = "MAX") -> pd.DataFrame:
     # The max price for past d days, divided by latest close price to remove unit
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w).max()) / data
+        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w, min_periods=w - 1).max()) / data
     return pd.concat([X, features], axis=1)
 
 
-def MIN(X, data, data_group, windows, name="MIN"):
+def MIN(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+        name: str = "MIN") -> pd.DataFrame:
     # The low price for past d days, divided by latest close price to remove unit
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w).min()) / data
+        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w, min_periods=w - 1).min()) / data
     return pd.concat([X, features], axis=1)
 
 
-def QTL(X, data, data_group, windows, name="QTL"):
+def RANK(X: pd.DataFrame, data_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "RANK") -> pd.DataFrame:
+    # 当前价格在过去一段时间中所处的水平
+    features = pd.DataFrame()
+    for w in windows:
+        features[name + str(w)] = data_group.transform(lambda x: x.rolling(w, min_periods=w - 1).rank(pct=True))
+    return pd.concat([X, features], axis=1)
+
+
+def QTL(X: pd.DataFrame, data: pd.Series, data_group: pd.core.groupby.SeriesGroupBy, windows: list,
+        name: str = "QTL") -> pd.DataFrame:
     # The x% quantile of past d day's close price, divided by latest close price to remove unit
     features = pd.DataFrame()
     for w in windows:
-        features[name + "U" + str(w)] = data_group.transform(lambda x: x.rolling(w).quantile(0.8)) / data
-        features[name + "D" + str(w)] = data_group.transform(lambda x: x.rolling(w).quantile(0.2)) / data
+        features[name + "U" + str(w)] = data_group.transform(
+            lambda x: x.rolling(w, min_periods=w - 1).quantile(0.8)) / data
+        features[name + "D" + str(w)] = data_group.transform(
+            lambda x: x.rolling(w, min_periods=w - 1).quantile(0.2)) / data
     return pd.concat([X, features], axis=1)
 
 
-def CORR(X, data1_group, data2, windows, name="CORR"):
-    # 受统计套利理论(股票配对交易)的启发，追踪个股收益率与大盘收益率的相关系数 这里的思路是: 如果近期(rolling=5, 10)的相关系数偏离了远期相关系数
-    # (rolling=30, 60), 则有可能是个股发生了异动, 可根据异动的方向选择个股与大盘的多空组合
+def CORR_ts(X: pd.DataFrame, data1_group: pd.core.groupby.SeriesGroupBy, data2: pd.Series, windows: list,
+            name: str = "CORR") -> pd.DataFrame:
+    # 面板数据与时序数据计算相关系数, 在计算例如个股收益率与大盘收益率的相关系数时比普通方法快
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data1_group.transform(lambda x: x.rolling(w).corr(data2))
+        features[name + str(w)] = data1_group.transform(lambda x: x.rolling(w, min_periods=w - 1).corr(data2))
     return pd.concat([X, features], axis=1)
 
 
-def RSI(X, data_group, windows, name="RSI"):
+def calc_corr(data: pd.DataFrame, feature: str, label: str, window=None):
+    corr = data[feature].rolling(window).corr(data[label])
+    return corr
+
+
+def CORR(X: pd.DataFrame, data_group: pd.core.groupby.GroupBy, feature: str, label: str, name: str = "CORR",
+         windows=None):
+    """
+    example:
+    X = alpha.CORR(pd.DataFrame(), df, "close", "vol")
+
+    :param X:
+    :param data_group:
+    :param feature:
+    :param label:
+    :param name:
+    :param windows:
+    :return:
+    """
+    if windows is None:
+        windows = [5, 10, 20, 30, 60]
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: cal_rsi(x, w))
-    return pd.concat([X, features], axis=1)
+        features[name + str(w)] = data_group.apply(lambda x: calc_corr(x, feature, label, window=w))
+    return pd.concat([X, features.sort_index()], axis=1)
 
 
-def PSY(X, data_group, windows, name="PSY"):
+def RSI(X: pd.DataFrame, data_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "RSI") -> pd.DataFrame:
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.transform(lambda x: cal_psy(x, w))
+        features[name + str(w)] = data_group.transform(lambda x: calc_rsi(x, w))
     return pd.concat([X, features], axis=1)
 
 
-def PERF(X, data, group_idx, name="PERF"):
+def PSY(X: pd.DataFrame, data_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "PSY") -> pd.DataFrame:
+    features = pd.DataFrame()
+    for w in windows:
+        features[name + str(w)] = data_group.transform(lambda x: calc_psy(x, w))
+    return pd.concat([X, features], axis=1)
+
+
+def PERF(X: pd.DataFrame, data: pd.Series, group_idx: pd.core.groupby.SeriesGroupBy, name="PERF") -> pd.DataFrame:
     # performance: 股票当日收益率相对大盘的表现
     features = pd.DataFrame()
-    features[name + "1"] = data / (group_idx.mean() + 1e-12)
+    features[name + "1"] = data / (group_idx.mean() + 1e-10)
     features[name + "2"] = data / group_idx.std()
-    features[name + "3"] = data / (group_idx.max() + 1e-12)
-    features[name + "4"] = data / (group_idx.min() + 1e-12)
+    features[name + "3"] = data / (group_idx.max() + 1e-10)
+    features[name + "4"] = data / (group_idx.min() + 1e-10)
+    features = features.groupby(level=0).rank(pct=True)
     return pd.concat([X, features], axis=1)
 
 
-def IDX(X, data, idx, windows, name="IDX"):
+def IDX(X: pd.DataFrame, data: pd.Series, idx: pd.Series, windows: list, name: str = "IDX") -> pd.DataFrame:
     # 收盘价相对开盘价的变化, 与大盘的移动平均线对比
     features = pd.DataFrame()
     for w in windows:
-        features[name + "1_" + str(w)] = data / (idx.rolling(w).mean() + 1e-12)
-        features[name + "2_" + str(w)] = data / (idx.rolling(w).max() + 1e-12)
-        features[name + "3_" + str(w)] = data / (idx.rolling(w).min() + 1e-12)
-        features[name + "4_" + str(w)] = data / (idx.rolling(w).median() + 1e-12)
+        features[name + "1_" + str(w)] = data / (idx.rolling(w, min_periods=w - 1).mean() + 1e-10)
+        features[name + "2_" + str(w)] = data / (idx.rolling(w, min_periods=w - 1).max() + 1e-10)
+        features[name + "3_" + str(w)] = data / (idx.rolling(w, min_periods=w - 1).min() + 1e-10)
+        features[name + "4_" + str(w)] = data / (idx.rolling(w, min_periods=w - 1).median() + 1e-10)
+    features = features.groupby(level=0).rank(pct=True)
     return pd.concat([X, features], axis=1)
 
 
-def RSV(X, data, low_group, high_group, windows, name="RSV"):
+def RSV(X: pd.DataFrame, data: pd.Series, low_group: pd.core.groupby.SeriesGroupBy,
+        high_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "RSV") -> pd.DataFrame:
     # Represent the price position between upper and lower resistant price for past d days.
     features = pd.DataFrame()
     for w in windows:
-        LOW = low_group.transform(lambda x: x.rolling(w).min())
-        HIGH = high_group.transform(lambda x: x.rolling(w).max())
-        features[name + str(w)] = (data - LOW) / (HIGH - LOW + 1e-12)
+        LOW = low_group.transform(lambda x: x.rolling(w, min_periods=w - 1).min())
+        HIGH = high_group.transform(lambda x: x.rolling(w, min_periods=w - 1).max())
+        features[name + str(w)] = (data - LOW) / (HIGH - LOW + 1e-10)
     return pd.concat([X, features], axis=1)
 
 
 # Greeks for stocks
-def DELTA(X, ret_group, idx_return, name="DELTA"):
+def DELTA(X: pd.DataFrame, ret_group: pd.core.groupby.SeriesGroupBy, idx_return: pd.Series,
+          name: str = "DELTA") -> pd.DataFrame:
     # The delta of option greeks
     # DELTA = partial P / partial S. Let P be R_it and S be R_m
     features = pd.DataFrame()
-    features[name] = ret_group.diff() / (idx_return.diff() + 1e-12)
+    features[name] = ret_group.diff() / (idx_return.diff() + 1e-10)
+    # Min, Max = features.groupby(level=0).min(), features.groupby(level=0).max()
+    # features -= Min
+    # features /= Max - Min
+    features = features.groupby(level=0).rank(pct=True)
     return pd.concat([X, features], axis=1)
 
 
-def GAMMA(X, idx_return, name="GAMMA"):
+def GAMMA(X: pd.DataFrame, idx_return: pd.Series, name: str = "GAMMA") -> pd.DataFrame:
     # The gamma of greek value, which equals partial DELTA / partial S
     # suppose delta DELTA  = gamma * delta S, which means gamma = delta DELTA / delta S
     features = pd.DataFrame()
-    features[name] = X["DELTA"].groupby(X.index.names[1]).diff() / (idx_return.diff() + 1e-12)
+    features[name] = X["DELTA"].groupby(X.index.names[1]).diff() / (idx_return.diff() + 1e-10)
+    # Min, Max = features.groupby(level=0).min(), features.groupby(level=0).max()
+    # features -= Min
+    # features /= Max - Min
+    features = features.groupby(level=0).rank(pct=True)
     return pd.concat([X, features], axis=1)
 
 
-def VEGA(X, ret_group, windows, name="VEGA"):
+def VEGA(X: pd.DataFrame, ret_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "VEGA") -> pd.DataFrame:
     # The vega of greek value
     # delta p / delta sigma
     delta_ret = ret_group.diff()
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = delta_ret / ret_group.transform(lambda x: x.rolling(w).std())
+        features[name + str(w)] = delta_ret / ret_group.transform(lambda x: x.rolling(w, min_periods=w - 1).std())
     return pd.concat([X, features], axis=1)
 
 
 # 来自金融风险管理的因子
-def VAR(X, ret_group, windows, name="VAR"):
+def VAR(X: pd.DataFrame, ret_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "VAR") -> pd.DataFrame:
     # the VaR of return at prob 5%
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = ret_group.transform(lambda x: VaR(x.rolling(w)))
+        features[name + str(w)] = ret_group.transform(lambda x: VaR(x.rolling(w, min_periods=w - 1)))
     return pd.concat([X, features], axis=1)
 
 
-def make_factors(kwargs=None, windows=None, fillna=False):
+def SHARPE(X: pd.DataFrame, ret_group: pd.core.groupby.SeriesGroupBy, windows: list, name: str = "SHARPE", rank=True) \
+        -> pd.DataFrame:
+    features = pd.DataFrame()
+    for w in windows:
+        mean = ret_group.transform(lambda x: x.rolling(w).mean())
+        std = ret_group.transform(lambda x: x.rolling(w).std())
+        features[name + str(w)] = mean / (std + 1e-10)
+    if rank:
+        features = features.groupby(level=0, group_keys=False).rank(pct=True)
+    return pd.concat([X, features], axis=1)
+
+
+def make_factors(kwargs: dict = None, windows: list = None, fillna: bool = False) -> pd.DataFrame:
     """
     面板数据适用，序列数据请移步 make_factors_series
 
@@ -324,6 +419,8 @@ def make_factors(kwargs=None, windows=None, fillna=False):
         kwargs["low"] = None
 
     data = kwargs["data"]
+
+    # fixme: 类型应为str | None
     open = kwargs["open"]
     close = kwargs["close"]
     volume = kwargs['volume']
@@ -352,8 +449,9 @@ def make_factors(kwargs=None, windows=None, fillna=False):
         group_r = data["ret"].groupby(groupby)
         mean_ret = data["ret"].groupby(datetime).mean()
 
-        X = MACD(X, group_c, groupby=groupby)
+        # X = MACD(X, group_c, groupby=groupby)
         X = RET(X, data[close], group_c, groupby=datetime)
+        X = SHARPE(X, group_r, windows=windows)
         X = SHIFT(X, data[close], group_c, windows=windows, name="CLOSE")
         X = ROC(X, data[close], group_c, windows=windows)
         X = BETA(X, data[close], group_c, windows=windows)
@@ -361,13 +459,14 @@ def make_factors(kwargs=None, windows=None, fillna=False):
         X = STD(X, data[close], group_c, windows=windows)
         X = MAX(X, data[close], group_c, windows=windows)
         X = MIN(X, data[close], group_c, windows=windows)
+        X = RANK(X, group_r, windows=windows)
         X = QTL(X, data[close], group_c, windows=windows)
         # X = MA(X, data["ret"], group_r, windows=windows, name="MA2_")
         # X = STD(X, data["ret"], group_r, windows=windows, name="STD2_")
-        X = CORR(X, group_r, mean_ret, windows=windows)
+        X = CORR_ts(X, group_r, mean_ret, windows=windows)
 
         group_r_rank = X["RET2_1"].groupby(groupby)
-        X = CORR(X, group_r_rank, mean_ret, windows=windows, name="CORR2_")
+        X = CORR_ts(X, group_r_rank, mean_ret, windows=windows, name="CORR2_")
 
         # 来自行为金融学的指标
         X = RSI(X, group_c, windows=windows)
@@ -406,16 +505,22 @@ def make_factors(kwargs=None, windows=None, fillna=False):
                     features["KDJ_D"] = features["KDJ_K"].groupby(groupby).transform(lambda x: x.rolling(3).mean())
                     del l9, h9
                     features["KLEN"] = (data[high] - data[low]) / data[open]
-                    features["KIMD2"] = (data[close] - data[open]) / (data[high] - data[low] + 1e-12)
-                    features["KUP2"] = (data[high] - data[open]) / (data[high] - data[low] + 1e-12)
+                    features["KMID2"] = (data[close] - data[open]) / (data[high] - data[low] + 1e-10)
+                    features["KUP2"] = (data[high] - data[open]) / (data[high] - data[low] + 1e-10)
                     features["KLOW"] = (data[close] - data[low]) / data[open]
-                    features["KLOW2"] = (data[close] - data[low]) / (data[high] - data[low] + 1e-12)
+                    features["KLOW2"] = (data[close] - data[low]) / (data[high] - data[low] + 1e-10)
                     features["KSFT"] = (2 * data[close] - data[high] - data[low]) / data[open]
-                    features["KSFT2"] = (2 * data[close] - data[high] - data[low]) / (data[high] - data[low] + 1e-12)
+                    features["KSFT2"] = (2 * data[close] - data[high] - data[low]) / (data[high] - data[low] + 1e-10)
                     features["VWAP"] = (data[high] + data[low] + data[close]) / (3 * data[open])
-                    X = pd.concat([X, features], axis=1)
                     X = RSV(X, data[close], group_l, group_h, windows=windows)
+
+            X = pd.concat([X, features], axis=1)
+            # 在世坤的BRAIN挖到的因子
+            X["rank"] = -1 / (data["ret"].groupby("datetime").rank(pct=True) + 1e-10)
+            # X = CORR(X, data=X, feature="VWAP", label="rank", windows=windows, name="CORR3_")
+            # del X["rank"]
             del features
+
     if open is not None:
         X = SHIFT(X, data[open], group_o, windows=windows, name="OPEN")
 
@@ -429,13 +534,9 @@ def make_factors(kwargs=None, windows=None, fillna=False):
         X = SHIFT(X, data[low], group_l, windows=windows, name="LOW")
 
     if volume is not None:
-        # data["chg_vol"] = data[volume] / group_v.shift(1) - 1
-        # group_rv = data["chg_vol"].groupby(groupby)
         X = SHIFT(X, data[volume], group_v, windows=windows, name="VOLUME")
         X = MA(X, data[volume], group_v, windows=windows, name="VMA")
         X = STD(X, data[volume], group_v, windows=windows, name="VSTD")
-        # X = MA(X, data["chg_vol"], group_rv, windows=windows, name="VMA2_")
-        # X = STD(X, data["chg_vol"], group_rv, windows=windows, name="VSTD2_")
         X["VMEAN"] = data[volume] / data[volume].groupby(datetime).mean()
         if amount is not None:
             mean = data[amount] / data[volume]
@@ -443,25 +544,21 @@ def make_factors(kwargs=None, windows=None, fillna=False):
             X["MEAN2"] = mean / mean.groupby(datetime).mean()
             X = SHIFT(X, mean, group_mean, windows=windows, name="MEAN2_")
             del mean, group_mean
-        """
-        if close is not None:
-            group_r = data[close] / group_c.shift(1) - 1
-            # 收益率和chg_vol的相关系数
-            X = CORR(X, group_r, data["chg_vol"], windows=windows, name="CORRCV")
-            del group_r
-        """
+
+        # if close is not None:
+        # X = CORR(X, data, feature=close, label=volume, name="CORR4_")
 
     if amount is not None:
         X = SHIFT(X, data[amount], group_a, windows=windows, name="AMOUNT")
 
-    if fillna:
-        X = X.groupby(groupby).fillna(method="ffill").fillna(X.mean())
+    if fillna is True:
+        X = X.groupby(groupby).fillna(method="ffill").fillna(X[~X.isnull()].mean())
     end = time.time()
     print("time used:", end - start)
     return X
 
 
-def alpha360(kwargs, shift=60, fillna=False):
+def alpha360(kwargs: dict, shift: int = 60, fillna: bool = False) -> pd.DataFrame:
     start = time.time()
     if kwargs is None:
         kwargs = {}
@@ -519,7 +616,54 @@ def alpha360(kwargs, shift=60, fillna=False):
         X = SHIFT(X, data[amount], group_a, windows=windows, name="AMOUNT")
 
     if fillna:
-        X = X.groupby(groupby).fillna(method="ffill").fillna(X.mean())
+        X = X.groupby(groupby).fillna(method="ffill").fillna(X[~X.isnull()].mean())
     end = time.time()
     print("time used:", end - start)
     return X
+
+
+def get_resid(x: pd.Series, y: pd.Series) -> pd.Series:
+    """
+    经过100万级的数据的上百次实验, 证明此方法比调用sklearn.linear_model的LinearRegression平均快一倍
+    """
+    cov = x.cov(y)
+    var = x.var()
+    beta = cov / var
+    del cov, var
+    beta0 = y.mean() - beta * x.mean()
+    return y - beta0 - beta * x
+
+
+def neutralize(data: pd.DataFrame, target: pd.Series, features: list = None, n_jobs=-1) -> pd.DataFrame:
+    """
+    在截面上对选定的features进行target中性化, 剩余因子不变
+
+    example:
+
+    # 使用补充数据data, 对factor_raw的RSI, MACD和KDJ_K因子进行市值中性化
+
+    factor_neutralized = alpha.neutralize(factor_raw, target=data["ln_market_value"], features=["RSI", "MACD", "KDJ_K"])
+
+    :param data: 需要中性化的因子集合
+    :param target: 解释变量
+    :param features: 需要中性化的因子名(列表), 因为不同因子可能需要不同的中性化手法, 故通过此参数控制进行中性化的因子
+    :param n_jobs: 同时调用的cpu数
+    :return: pd.DataFrame, 包括中性化后的因子和未中性化的其它因子
+    """
+    target = target[target.index.isin(data.index)]
+    concat_data = pd.concat([data, target], axis=1)
+    target_name = target.name
+    features = data.columns if features is None else features
+    other_cols = [c for c in data.columns if c not in features]
+    del data, target
+
+    def neutralize_single_factor(f_name: str) -> pd.Series:
+        result = concat_data[[f_name, target_name]].groupby(level=0, group_keys=False).apply(
+            lambda x: get_resid(x[target_name], x[f_name]))
+        result.name = f_name
+        return result
+
+    factor_neu = Parallel(n_jobs=n_jobs)(delayed(neutralize_single_factor)(f) for f in features)
+    data_neu = pd.concat(factor_neu, axis=1)
+    del factor_neu
+    return pd.concat([data_neu, concat_data[other_cols]], axis=1)

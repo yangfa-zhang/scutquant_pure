@@ -16,75 +16,28 @@ warnings.filterwarnings("ignore")
 random.seed(2046)
 
 
-def join_data(data, data_join, time='datetime', col=None, index=None):
+def join_data(data: pd.DataFrame, data_join: pd.DataFrame, on: str = 'datetime', col: list = None, index: list = None)\
+        -> pd.DataFrame:
     """
     将序列数据(例如宏观的利率数据)按时间整合到面板数据中(例如沪深300成分)
     example:
 
-    df_train = scutquant.join_data(df_train, series_train, col=['index_return', 'rf'], index=['datetime', instrument'])
-    df_test = scutquant.join_data(df_test, series_test, col=['index_return', 'rf'], index=['datetime', 'instrument'])
+    df_train = scutquant.join_data(df_train, series_train, col=['index_return', 'rf'])
+    df_test = scutquant.join_data(df_test, series_test, col=['index_return', 'rf'])
     df = pd.concat([df_train, df_test], axis=0)
 
     :param data: pd.Series or pd.DataFrame, 股票数据(面板数据)
     :param data_join: pd.Series or pd.DataFrame, 要合并的序列数据
-    :param time: str, 表示时间的列(两个数据集同时拥有)
+    :param on: str, 表示时间(或者其它)的列(两个数据集同时拥有)
     :param col: list, 被合并数据的列名(必须在data_join中存在)
-    :param index: list, 面板数据的索引
+    :param index: list, 合并后数据的index
     """
+    if col is None:
+        col = data_join.columns
     if index is None:
-        index = ['datetime', 'instrument']
-    data = data.reset_index()
-    data_join = data_join.reset_index()
-    T = data[time].unique()
-
-    asset_list = []
-    for t in T:
-        data_chosen = data[data[time] == t]  # 找出每天资产池中资产的数量
-        asset_list.append(len(data_chosen))
-
-    if col is not None:
-        for c in col:
-            idx = 0
-            d_list = []
-            for a in asset_list:
-                data_join_chosen = data_join[c][idx]
-                # print(data_join_chosen)
-                for asset in range(a):
-                    d_list.append(data_join_chosen)
-                idx += 1
-            data[c] = d_list
-    data.set_index(index, inplace=True)
-    if 'index' in data.columns:
-        data = data.drop('index', axis=1)
-    return data
-
-
-def join_data_by_code(data, data_join, code='instrument', col=None, index=None):
-    """
-    场景：CAPM中每支股票对应一个beta和一个alpha（n*3的序列，包括股票代码、beta和alpha）, 将它们整合到股票的面板数据中（至少包括time, 股票代码）
-
-    :param data: pd.DataFrame or pd.Series, 面板数据
-    :param data_join: pd.DataFrame or pd.Series
-    :param code: str, 表示股票代码的列
-    :param col: list, data_join中待合并的列名
-    :param index: list, 合并后设置的索引
-    :return: pd.DataFrame
-    """
-    if index is None:
-        index = ['datetime', 'instrument']
-    data = data.reset_index()
-    data_join = data_join.reset_index()
-    for c in col:
-        data[c] = 0
-    for i in data[code].unique():
-        ind = data[data[code] == i].index
-        for c in range(len(col)):
-            data_ = data_join[data_join[code] == i][col[c]].values[0]
-            data.loc[ind, col[c]] = data_
-    data.set_index(index, inplace=True)
-    if 'index' in data.columns:
-        data = data.drop('index', axis=1)
-    return data
+        index = data.index.names
+    result = pd.merge(data.reset_index(), data_join[col].reset_index(), on=on, how="left")
+    return result.set_index(index)
 
 
 ####################################################
@@ -95,8 +48,8 @@ def price2ret(price, shift1=-1, shift2=-2, groupby=None, fill=False):
     return_rate = price_shift2 / price_shift1 - 1
 
     :param price: pd.DataFrame
-    :param shift1: int
-    :param shift2: int
+    :param shift1: int, the value shift as denominator
+    :param shift2: int, the value shift as numerator
     :param groupby: str
     :param fill: bool
     :return: pd.Series
@@ -199,20 +152,7 @@ def plot_pca_variance(pca):
     return axs
 
 
-def symmetric(X):  # 对称正交
-    col = X.columns
-    index = X.index
-    M = (X.shape[0] - 1) * np.cov(X.T.astype(float))
-    D, U = np.linalg.eig(M)
-    U = np.mat(U)
-    d = np.mat(np.diag(D ** (-0.5)))
-    S = U * d * U.T
-    X = np.mat(X) * S
-    X = pd.DataFrame(X, columns=col, index=index)
-    return X
-
-
-def cal_multicollinearity(X, show=False):
+def calc_multicollinearity(X, show=False):
     """
         反映多重共线性严重程度
     """
@@ -284,6 +224,14 @@ def feature_selector(df, score, value=0, verbose=0):
 # 数据清洗
 ####################################################
 def align(x, y):
+    """
+    align x's index with y
+    :param x: pd.DataFrame or pd.Series
+    :param y: pd.DataFrame or pd.Series
+    :return: pd.DataFrame(or pd.Series), pd.DataFrame(or pd.Series)
+    """
+    # print(x.index.names)
+    # print(y.index.names)
     if len(x) > len(y):
         x = x[x.index.isin(y.index)]
     elif len(y) > len(x):
@@ -296,30 +244,21 @@ def percentage_missing(X):
     return percent_missing
 
 
-def dropna(X, axis=0):
-    X = X.dropna(axis=axis)
-    return X
-
-
-def fillna(X, method='ffill'):
-    X = X.fillna(method=method)
-    return X
-
-
-def process_inf(X):
+def process_inf(X: pd.DataFrame) -> pd.DataFrame:
     for col in X.columns:
         X[col] = X[col].replace([np.inf, -np.inf], X[col][~np.isinf(X[col])].mean())
     return X
 
 
-def clean(X, axis=0):
+def clean(X: pd.DataFrame) -> pd.DataFrame:
     X.dropna(axis=1, how='all', inplace=True)
-    X = fillna(X)
-    X = dropna(X, axis)
+    X.fillna(method='ffill', inplace=True)
+    X.dropna(axis=0, inplace=True)
+    # X = process_inf(X)
     return X
 
 
-def cal_0(X, method='precise', val=0):  # 计算0或者其它数值的占比
+def calc_0(X, method='precise', val=0):  # 计算0或者其它数值的占比
     """
     :param X: pd.DataFrame, 输入的数据
     :param method: 'precise' or 'range'，需要计算占比的是数值还是某个范围
@@ -520,7 +459,7 @@ def auto_process(X, y, groupby=None, norm='z', label_norm=True, select=True, ort
     print("split data done", "\n")
 
     # 降采样
-    X_0 = cal_0(y_train)
+    X_0 = calc_0(y_train)
     if X_0 > 0.5:
         print('The types of label value are imbalance, apply down sample method', '\n')
         X_train = down_sample(X_train, col=y)
@@ -586,26 +525,17 @@ def auto_process(X, y, groupby=None, norm='z', label_norm=True, select=True, ort
             X_valid = ranknorm(X_valid, groupby=date)
             X_test = ranknorm(X_test, groupby=date)
 
-        X_train = X_train.groupby([groupby]).fillna(method='ffill').dropna()
-        X_valid = X_valid.groupby([groupby]).fillna(method='ffill').dropna()
-        X_test = X_test.groupby([groupby]).fillna(method='ffill').dropna()
-
-    X_train.dropna(axis=1, how='all', inplace=True)
-    X_valid.dropna(axis=1, how='all', inplace=True)
-    X_test.dropna(axis=1, how='all', inplace=True)
+        X_train = X_train.groupby(groupby).fillna(method='ffill').dropna()
+        X_valid = X_valid.groupby(groupby).fillna(method='ffill').dropna()
+        X_test = X_test.groupby(groupby).fillna(method='ffill').dropna()
 
     print('norm data done', '\n')
 
-    # 特征正则化
+    # PCA降维
     if orth:
-        r = cal_multicollinearity(X_train)
-        if r > 0.35:
-            print('To solve multicollinearity problem, orthogonal method will be applied')
-            result = make_pca(X_train)
-            pca, X_train = result["pca"], result["X_pca"]
-            X_valid = pca.transform(X_valid)
-            X_test = pca.transform(X_test)
-            print('PCA done')
+        result = make_pca(X_train)
+        pca, X_train = result["pca"], result["X_train"]
+        X_valid, X_test = pca.transform(X_valid), pca.transform(X_test)
 
     # 特征选择
     if select:

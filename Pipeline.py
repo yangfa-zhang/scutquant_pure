@@ -41,6 +41,7 @@ def load_data(target_dir="", kwargs=None, auto_generate=False):
         kwargs = {
             "format": "csv",
             "encoding": "utf-8-sig",
+            "precision": "float64",
             "index_col": ["datetime", "stock_code"],
             "index_names": None,
             "process_nan": True,
@@ -66,6 +67,7 @@ def load_data(target_dir="", kwargs=None, auto_generate=False):
     else:
         data = pd.DataFrame()
         print("Not support this format yet")
+
     index, index_names = kwargs["index_col"], kwargs["index_names"]
     if index is not None:
         data[index[0]] = pd.to_datetime(data[index[0]])  # 转换成日期格式
@@ -73,10 +75,11 @@ def load_data(target_dir="", kwargs=None, auto_generate=False):
     if index_names is not None:
         data.index.names = index_names
     data = data[~data.index.duplicated()]
-    if kwargs["process_nan"]:
-        data = data.groupby(data.index.names[1]).fillna(method="ffill").dropna()
+
+    data = data.astype(kwargs["precision"]) if "precision" in kwargs.keys() else data
 
     if "label" not in data.columns:
+        # 当数据集里没有label时, 用已有的数据计算label(目标值)
         if "add" not in kwargs["label"].keys():
             kwargs["label"]["add"] = 0
         if "divide" not in kwargs["label"].keys():
@@ -90,8 +93,10 @@ def load_data(target_dir="", kwargs=None, auto_generate=False):
             if "shift" not in kwargs["label"].keys():
                 kwargs["label"]["shift"] = -2
             data["label"] = data[kwargs["label"]["by"]].groupby(data.index.names[1]).shift(kwargs["label"]["shift"])
-    data["label"] += kwargs["label"]["add"]
-    data["label"] /= kwargs["label"]["divide"]
+        data["label"] += kwargs["label"]["add"]
+        data["label"] /= kwargs["label"]["divide"]
+    if kwargs["process_nan"]:
+        data = data.groupby(data.index.names[1]).apply(lambda x: q.clean(x))
     return data
 
 
@@ -102,7 +107,7 @@ def get_factors(data, kwargs=None, auto_generate=False):
             "close": "close",
             "high": "high",
             "low": "low",
-            "volume": "vol",
+            "volume": "volume",
             "amount": "amount",
             "windows": [5, 10, 20, 30, 60],
             "fillna": False
@@ -139,6 +144,23 @@ def process_data(data, kwargs=None, auto_generate=False):
             "select_features": False,
             "orth_data": False,
         }
+
+    def init():
+        if "label" not in kwargs.keys():
+            kwargs["label"] = "label"
+        if "normalization" not in kwargs.keys():
+            kwargs["normalization"] = "z"
+        if "label_norm" not in kwargs.keys():
+            kwargs["label_norm"] = True
+        if "select_features" not in kwargs.keys():
+            kwargs["select_features"] = False
+        if "orth_data" not in kwargs.keys():
+            kwargs["orth_data"] = False
+        if "clip_data" not in kwargs.keys():
+            kwargs["clip_data"] = None
+        return kwargs
+
+    kwargs = init()
     if kwargs["groupby"] is not None:
         kwargs["groupby"] = data.index.names[1]
     result = q.auto_process(data, kwargs["label"], groupby=kwargs["groupby"], norm=kwargs["normalization"],
@@ -149,7 +171,7 @@ def process_data(data, kwargs=None, auto_generate=False):
 
 def fit_data(result, target_dir="", kwargs=None, auto_generate=False):
     X_train, X_valid, X_test = result["X_train"], result["X_valid"], result["X_test"]
-    y_train, y_valid, y_test = result["y_train"], result["y_valid"], result["y_test"]
+    y_train, y_valid = result["y_train"], result["y_valid"]
     ymean, ystd = result["ymean"], result["ystd"]
     if kwargs is None and auto_generate:
         kwargs = {
@@ -313,11 +335,11 @@ def all_factors_ana(target_dir="", kwargs=None, auto_generate=True):
     data = load_data(target_dir=target_dir, kwargs=data_kwargs, auto_generate=auto_generate)
     if kwargs["factor"]["calculate"] is True:
         factor = get_factors(data, factor_kwargs, auto_generate=auto_generate)
+        data_concat = concat_data(factor, data["label"])
     else:
-        factor = data.copy().pop("label")
+        data_concat = data
 
     # 数据清洗, 拆分features和label
-    data_concat = concat_data(factor, data["label"])
     result = process_data(data_concat, process_kwargs, auto_generate=auto_generate)
     features, label = result["X_train"], result["y_train"]
     features_test, label_test = result["X_test"], result["y_test"]
@@ -354,3 +376,52 @@ def all_factors_ana(target_dir="", kwargs=None, auto_generate=True):
     # 总体IC的分层效应
     report.group_return_ana(prediction, label_test, groupby=prediction.index.names[0])
 
+
+def single_factor_ana(target_dir: str, kwargs: dict, auto_generate: bool = True):
+    """
+    The factor you want to analysis should be calculated before you call this function
+
+    :param target_dir:
+    :param kwargs:
+    :param auto_generate:
+    :return:
+    """
+
+    if kwargs is None:
+        with open(target_dir + "/single_factor_ana.yaml", 'r') as file:
+            kwargs = yaml.load(file, Loader=yaml.FullLoader)
+        file.close()
+
+    def init():
+        d_kwargs = kwargs["data"] if "data" in kwargs.keys() else None
+        p_kwargs = kwargs["process"] if "process" in kwargs.keys() else None
+        return d_kwargs, p_kwargs
+
+    data_kwargs, process_kwargs = init()
+
+    # load_data
+    data = load_data(target_dir, kwargs=data_kwargs, auto_generate=auto_generate)
+
+    # process_data(feature and label)
+    result = process_data(data, process_kwargs, auto_generate=auto_generate)
+    feature, label = result["X_train"], result["y_train"]
+    feature_test, label_test = result["X_test"], result["y_test"]
+
+    # ic
+    n_periods = len(feature.index.get_level_values(0).unique())
+    ic = calc_ic(feature, label)
+    f_name = feature.columns[0]
+    rank_ic = concat_data(feature, label).groupby(feature.index.names[0]).apply(
+        lambda x: x[f_name].corr(x["label"], method="spearman"))
+    ic_mean, ic_std = ic.mean(), ic.std()
+    icir = ic_mean / ic_std
+    t_stat = ic_mean / ic_std * (n_periods ** 0.5)
+    ic.to_pickle(target_dir + "/" + feature.columns[0] + "_ic.pkl")
+    factors_performance = pd.DataFrame(
+        {"ic_mean": [ic_mean], "icir": [icir], "rank_ic_mean": [rank_ic.mean()],
+         "rank_icir": [rank_ic.mean() / rank_ic.std()], "t-stat": [t_stat]}, index=feature.columns)
+    factors_performance.to_csv(target_dir + "/" + feature.columns[0] + "_performance.csv")
+
+    # group_return_ana
+    feature.columns.names = ["predict"]
+    report.group_return_ana(feature, label_test, groupby=feature_test.index.names[0])
