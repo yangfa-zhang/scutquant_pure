@@ -47,14 +47,14 @@ from scipy.stats import norm
 from joblib import Parallel, delayed
 
 
-def get_factor_loadings(concat_data: pd.DataFrame, feature: str, label: str):
+def get_factor_loadings(concat_data: pd.DataFrame, feature: str, label: str) -> pd.Series:
     """
     考虑最简单的单指数模型: R = β * Rm + α, 其中α应为0, β = cov(R, Rm) / var(Rm)
     使用rolling方法避免在回测中出现数据泄露(实盘不会出现这个问题)
     """
-    cov = concat_data[feature].rolling(60, min_periods=30).cov(concat_data[label])
-    var = concat_data[feature].rolling(60, min_periods=30).var()
-    beta = cov / var
+    cov: pd.Series = concat_data[feature].rolling(60, min_periods=30).cov(concat_data[label])
+    var: pd.Series = concat_data[feature].rolling(60, min_periods=30).var()
+    beta: pd.Series = cov / var
     return beta * concat_data[feature]
 
 
@@ -233,6 +233,16 @@ def ts_CORR(X: pd.DataFrame, data1_group: pd.core.groupby.SeriesGroupBy, data2: 
     return pd.concat([X, features], axis=1)
 
 
+def ts_BETA(X: pd.DataFrame, data1_group: pd.core.groupby.SeriesGroupBy, data2: pd.Series, windows: list,
+            name: str = "ts_BETA") -> pd.DataFrame:
+    features = pd.DataFrame()
+    for w in windows:
+        cov = data1_group.transform(lambda x: x.rolling(w).cov(data2))
+        var = data1_group.transform(lambda x: x.rolling(w).var())
+        features[name + str(w)] = cov / var
+    return pd.concat([X, features], axis=1)
+
+
 def calc_corr(data: pd.DataFrame, feature: str, label: str, window=None):
     corr = data[feature].rolling(window).corr(data[label])
     return corr
@@ -267,7 +277,8 @@ def CORR(X: pd.DataFrame, data_group: pd.core.groupby.GroupBy, feature: str, lab
         windows = [5, 10, 20, 30, 60]
     features = pd.DataFrame()
     for w in windows:
-        features[name + str(w)] = data_group.apply(lambda x: calc_corr(x, feature, label, window=w))
+        features[name + str(w)] = \
+            data_group.apply(lambda x: calc_corr(x, feature, label, window=w)).reset_index(0, drop=True)
     return pd.concat([X, features.sort_index()], axis=1)
 
 
@@ -679,3 +690,35 @@ def neutralize(data: pd.DataFrame, target: pd.Series, features: list = None, n_j
     data_neu = pd.concat(factor_neu, axis=1)
     del factor_neu
     return pd.concat([data_neu, concat_data[other_cols]], axis=1)
+
+
+def market_neutralize(x: pd.Series, long_only=False) -> pd.Series:
+    """
+    市场组合中性化:
+    (1) 对所有股票减去其截面上的因子均值
+    (2) 在(1)之后, 对每支股票除以截面上的因子值绝对值之和
+
+    这样处理后每支股票会获得一个权重, 代表着资金的方向和数量(例如0.5代表半仓做多, -0.25代表1/4仓做空),
+    且截面上的权重之和为0, 绝对值之和为1.
+    """
+    mean = x.groupby(level=0).mean()
+    x -= mean
+    if long_only:  # 考虑到A股有做空限制, 因此将权重为负的股票(即做空的股票)的权重调整为0(即纯多头), 并相应调整多头的权重
+        x[x.values < 0] = 0
+        abs_sum = x[x.values > 0].groupby(level=0).sum()
+    else:
+        abs_sum = abs(x).groupby(level=0).sum()
+    x /= abs_sum
+    return x
+
+
+def get_factor_portfolio(feature: pd.Series, label: pd.Series, long_only: bool = False) -> pd.Series:
+    x_neu = market_neutralize(feature, long_only=long_only)
+    X = pd.DataFrame({"feature": x_neu, "label": label})
+    X.dropna(inplace=True)
+    X["factor_return"] = X["feature"] * X["label"]
+    daily_return = X["factor_return"].groupby("datetime").sum()
+    daily_return += 1
+    portfolio = daily_return.cumprod()
+    portfolio.index = pd.to_datetime(portfolio.index)
+    return portfolio
